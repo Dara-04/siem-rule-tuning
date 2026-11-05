@@ -31,6 +31,15 @@ For every attack I kept a benign window with only normal staff activity and a se
 
 Grouping failed logins by source IP gave one useless alert, because all the employees and the attacker shared the same machine. Grouping by the account being targeted flagged only 2 employees and still caught root with 310 failures.
 
+The tuned rule:
+
+```spl
+index=main sourcetype=linux_secure "Failed password"
+| rex field=_raw "Failed password for (invalid user )?(?<target_user>\w+) from"
+| stats count by target_user
+| where count > 5
+```
+
 | Before | After |
 | --- | --- |
 | ![Grouping by source IP](screenshots/1-bruteforce-before.png) | ![Grouping by target user](screenshots/2-bruteforce-after.png) |
@@ -39,6 +48,17 @@ Grouping failed logins by source IP gave one useless alert, because all the empl
 
 21 of the 32 raw sudo lines were automatic PAM messages, not people. The real attack looked exactly like a normal admin command, so the fix was to tell the rule who is allowed to act as root.
 
+The tuned rule:
+
+```spl
+index=main sourcetype=linux_secure process=sudo COMMAND=* USER=root
+| rex "sudo:\s+(?<invoking_user>\w+)\s+:"
+| stats count by invoking_user
+| search NOT invoking_user=dara
+```
+
+In a real SOC, the excluded name would come from a list of approved admins rather than being typed into the rule.
+
 | Before | After |
 | --- | --- |
 | ![Raw sudo search, 32 lines](screenshots/3-privesc-before.png) | ![Tuned rule, employee1 only](screenshots/4-privesc-after.png) |
@@ -46,6 +66,14 @@ Grouping failed logins by source IP gave one useless alert, because all the empl
 ## Attack 3: port scanning
 
 My first scan only logged 10 ports because the firewall's logging was rate limited. I fixed it with high logging and a 20ms scan delay. Normal traffic never touched more than 4 ports per machine, so a threshold of 10 isolated the scanner cleanly.
+
+The tuned rule:
+
+```spl
+index=main sourcetype=ufw
+| stats dc(DPT) as distinct_ports by SRC
+| where distinct_ports > 10
+```
 
 | Before | After |
 | --- | --- |
@@ -56,7 +84,7 @@ My first scan only logged 10 ports because the firewall's logging was rate limit
 | File | What it is |
 | --- | --- |
 | SIEM_Rule_Tuning_Case_Study.pdf | The full case study |
-| detection-searches-and-lab-setup.txt | Every SPL search, attack command and lab setup command I used |
+| detection-searches-and-lab-setup.txt | Every SPL search (including the untuned versions), attack command and lab setup command I used |
 | screenshots/ | Before and after results from Splunk |
 
 ## Tools
